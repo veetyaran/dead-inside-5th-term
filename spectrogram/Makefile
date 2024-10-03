@@ -15,7 +15,7 @@ SRCS = spectrogram.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 # Правило по умолчанию - сборка всего проекта
-all: $(TARGET)
+all: check_libsndfile $(TARGET)
 
 # Правило для сборки исполняемого файла
 $(TARGET): $(OBJS)
@@ -25,6 +25,13 @@ $(TARGET): $(OBJS)
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# Проверка и установка библиотеки libsndfile
+check_libsndfile:
+	@if ! pkg-config --exists sndfile; then \
+		echo "Installing libsndfile..."; \
+		sudo apt-get update && sudo apt-get install -y libsndfile1-dev; \
+	fi
+
 # Правило для очистки скомпилированных файлов
 clean:
 	rm -f $(OBJS) $(TARGET)
@@ -33,4 +40,4 @@ clean:
 clean_all: clean
 	rm -f result.txt spectrogram.png
 
-.PHONY: all clean clean_all
+.PHONY: all clean clean_all check_libsndfile
