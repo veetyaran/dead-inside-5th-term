@@ -1,0 +1,3 @@
+/mnt/c/study/server/build/CMakeFiles/MessageBoard.dir
+/mnt/c/study/server/build/CMakeFiles/edit_cache.dir
+/mnt/c/study/server/build/CMakeFiles/rebuild_cache.dir
