@@ -91,16 +91,16 @@ ebml_element* get_element(std::array<uint8_t, 4> id, uint8_t level){
 
 class ebml_parser{
 public:
-void parse(int fd, FILE * out){
+void parse(FILE * in, FILE * out){
 	int len, mask, pos = 0;
 	uint8_t buffer[BUFSIZE];
 	uint8_t *carriage;
-	std::bitset<8> bits;
+	uint8_t bits;
 
 	while(1){
 		carriage = buffer;
 		// Get EBML Element ID first byte.
-		if((len = read(fd, carriage, 1)) < 0){
+		if((len = fread(carriage, 1, 1, in)) < 0){
 			std::cout << "Uh oh, read first id byte error!\n";
 			break;
 		}else if(len == 0){
@@ -108,29 +108,29 @@ void parse(int fd, FILE * out){
 			break;
 		}
 		pos++;
-
 		if(carriage[0] == 0){
 			std::cout << "Read '0' byte..." << std::endl;
-			if(!(fwrite(buffer, 1, carriage - buffer, out))) {
+			if((fwrite(buffer, 1, carriage - buffer, out) != 1)) {
 				printf("Can't open output");
+				return;
 			}
 			continue;
 		}
 
-		bits = std::bitset<8>(carriage[0]);
+		bits = carriage[0];
 		simple_vint id;
 		id.width = 1;
 		mask = 0x80;
 		// Get EBML Element ID vint width.
-		while(!(carriage[0] & mask)){
+		while(!(bits & mask)){
 			mask >>= 1;
 			id.width++;
 		}
 
-		id.data[0] = carriage[0];
+		id.data[0] = bits;
 		carriage++;
 		// Get EBML Element ID vint data.
-		if((len = read(fd, carriage, id.width - 1)) != id.width - 1){
+		if((len = fread(carriage, 1, id.width - 1, in)) != id.width - 1){
 			std::cout << "Uh oh, read id data error!\n";
 			break;
 		}
@@ -138,53 +138,49 @@ void parse(int fd, FILE * out){
 		// Get EBML Element ID.
 		for(int i = 1; i < id.width; ++i){
 			id.data[i] = carriage[i - 1];
-			bits = std::bitset<8>(carriage[i]);
 		}
 		carriage += id.width - 1;
 
 		// Get EBML Element Size first byte.
-		if((len = read(fd, carriage, 1)) != 1){
+		if((len = fread(carriage, 1, 1, in)) != 1){
 			std::cout << "Uh oh, read first size byte error!\n";
 			break;
 		}
 		pos++;
-		bits = std::bitset<8>(carriage[0]);
+		bits = carriage[0];
 		simple_vint size;
 		size.width = 1;
 		mask = 0x80;
 		// Get EBML Element Size vint width.
-		while(!(carriage[0] & mask)){
+		while(!(bits & mask)){
 			mask >>= 1;
 			size.width++;
 		}
 
-		carriage[0] ^= mask;
-		size.data[0] = carriage[0];
+		bits ^= mask;
+		size.data[0] = bits;
 		carriage++;
 		// Get EBML Element Size vint data.
-		if((len = read(fd, carriage, size.width - 1)) != size.width - 1){
+		if((len = fread(carriage, 1, size.width - 1, in)) != size.width - 1){
 			std::cout << "Uh oh, read id data error!\n";
 			break;
 		}
 		pos += size.width - 1;
-		bits = std::bitset<8>(size.data[0]);
 		// Get EBML Element Size.
 		for(int i = 1; i < size.width; ++i){
-			size.data[i] = carriage[i - 1];
-			bits = std::bitset<8>(carriage[i]);
-		}
+			size.data[i] = carriage[i - 1];		}
 
 		// Specification for ID lookup.
 		ebml_element* e = get_element(
 			{{id.data[0], id.data[1], id.data[2], id.data[3]}},
 			id.width);
 
+		carriage += size.width - 1;
 		if(e != 0){
 			if(e->type != MASTER){
 				// Get EBML Element Data, parse it.
 				uint64_t data_len = size.get_uint();
-				carriage += size.width - 1;
-				if((len = read(fd, carriage, data_len) != data_len)){
+				if((len = fread(carriage, 1, data_len, in) != data_len)){
 					std::cout << "Uh oh, could not read all the data!" << std::endl;
 					std::cout << "Wanted " << data_len << " found " << len << std::endl;
 					break;
@@ -202,17 +198,16 @@ void parse(int fd, FILE * out){
 					// }
 					std::cout << std::endl;
 					if(e->name == "SimpleBlock" || e->name == "Block"){
-						bits = std::bitset<8>(carriage[0]);
+						bits = carriage[0];
 						simple_vint track_number;
 						track_number.width = 1;
 						mask = 0x80;
-						while(!(carriage[0] & mask)){
+						while(!(bits & mask)){
 							mask >>= 1;
 							track_number.width++;
 						}
-						carriage[0] ^= mask;
+						bits ^= mask;
 						for(int i = 0; i < track_number.width; ++i){
-							bits = std::bitset<8>(carriage[i]);
 							track_number.data[i] = carriage[i];
 						}
 						std::cout << "Track Number: " << std::dec << (int)track_number.get_uint() << std::endl;
@@ -260,6 +255,7 @@ void parse(int fd, FILE * out){
 		const int len = carriage - buffer;
 		if(fwrite(buffer, 1, len, out) != len) {
 			printf("Failed to write output\n");
+			return;
 		} 
 	}
 }
@@ -268,13 +264,24 @@ void parse(int fd, FILE * out){
 
 
 int main(int argc, char** argv){
-	FILE * out = fopen("output.webm", "wb");
-	if(!out) {
-		printf("Can't open file!");
+	if(argc != 3) {
+		printf("Usage: %s <input.webm> <output.webm>\n", argv[0]);
+		return 1;
+	}
+	FILE * input = fopen(argv[1], "rb");
+	if(!input) {
+		printf("Can't open input file\n");
+		return -1;
+	}
+	FILE * output = fopen(argv[2], "wb");
+	if(!output) {
+		printf("Can't open output file!");
+		fclose(input);
 		return -2;
 	}
 	ebml_parser p;
-	p.parse(STDIN_FILENO, out);
-	fclose(out);
+	p.parse(input, output);
+	fclose(input);
+	fclose(output);
 	return 0;
 }
