@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
@@ -91,7 +92,7 @@ ebml_element* get_element(std::array<uint8_t, 4> id, uint8_t level){
 
 class ebml_parser{
 public:
-void parse(FILE * in, FILE * out){
+void parse(FILE* in, void(*callback)(const uint8_t* buffer, size_t len, const ebml_element* elem, const uint8_t* data)) {
 	int len, mask, pos = 0;
 	uint8_t buffer[BUFSIZE];
 	uint8_t *carriage;
@@ -108,16 +109,14 @@ void parse(FILE * in, FILE * out){
 			break;
 		}
 		pos++;
+
 		if(carriage[0] == 0){
-			std::cout << "Read '0' byte..." << std::endl;
-			if((fwrite(buffer, 1, carriage - buffer, out) != 1)) {
-				printf("Can't open output");
-				return;
-			}
-			continue;
+			printf("encountered 0 byte, refuse to parse further\n");
+			break;
 		}
 
 		bits = carriage[0];
+
 		simple_vint id;
 		id.width = 1;
 		mask = 0x80;
@@ -139,14 +138,15 @@ void parse(FILE * in, FILE * out){
 		for(int i = 1; i < id.width; ++i){
 			id.data[i] = carriage[i - 1];
 		}
-		carriage += id.width - 1;
 
+		carriage += id.width - 1;
 		// Get EBML Element Size first byte.
 		if((len = fread(carriage, 1, 1, in)) != 1){
 			std::cout << "Uh oh, read first size byte error!\n";
 			break;
 		}
 		pos++;
+
 		bits = carriage[0];
 		simple_vint size;
 		size.width = 1;
@@ -166,9 +166,11 @@ void parse(FILE * in, FILE * out){
 			break;
 		}
 		pos += size.width - 1;
+
 		// Get EBML Element Size.
 		for(int i = 1; i < size.width; ++i){
-			size.data[i] = carriage[i - 1];		}
+			size.data[i] = carriage[i - 1];
+		}
 
 		// Specification for ID lookup.
 		ebml_element* e = get_element(
@@ -186,58 +188,9 @@ void parse(FILE * in, FILE * out){
 					break;
 				}
 				pos += data_len;
-				std::cout << '(' << std::dec << pos << ") " << e->name << ": ";
-				if(e->type == BINARY){
-					// for(int i = 0; i < data_len; ++i){
-					// 	// I'll only care about the first 32 binary bytes.
-					// 	if(i == 32){
-					// 		std::cout << "...";
-					// 		break;
-					// 	}
-					// 	std::cout << std::hex << (int)carriage[i];
-					// }
-					std::cout << std::endl;
-					if(e->name == "SimpleBlock" || e->name == "Block"){
-						bits = carriage[0];
-						simple_vint track_number;
-						track_number.width = 1;
-						mask = 0x80;
-						while(!(bits & mask)){
-							mask >>= 1;
-							track_number.width++;
-						}
-						bits ^= mask;
-						for(int i = 0; i < track_number.width; ++i){
-							track_number.data[i] = carriage[i];
-						}
-						std::cout << "Track Number: " << std::dec << (int)track_number.get_uint() << std::endl;
-						int16_t timecode = (int16_t)(((uint16_t)carriage[track_number.width] << 8) | carriage[track_number.width + 1]);
-						std::cout << "Timecode: " << std::dec << (int)timecode << std::endl;
-					}
-				}else if(e->type == UINT){
-					simple_vint data;
-					data.width = 0;
-					for(int i = 0; i < data_len; ++i){
-						data.data[i] = carriage[i];
-						data.width++;
-					}
-					uint64_t val = data.get_uint();
-					std::cout << std::dec << val;
-					std::cout << std::endl;
-				}else if(e->type == INT){
-					simple_vint data;
-					data.width = 0;
-					for(int i = 0; i < data_len; ++i){
-						data.data[i] = carriage[i];
-						data.width++;
-					}
-					std::cout << std::dec << int64_t(data.get_uint()) << std::endl;
-				}else{
-					for(int i = 0; i < data_len; ++i){
-						std::cout << std::hex << (int)carriage[i];
-					}
-					std::cout << std::endl;
-				}
+				std::cout << '(' << std::dec << pos << ") " << e->name;
+				std::cout << std::endl;
+				callback(buffer, carriage + data_len - buffer, e, carriage);
 				carriage += data_len;
 			}else{
 				// Master data is actually just more elements, continue.
@@ -248,40 +201,129 @@ void parse(FILE * in, FILE * out){
 					std::cout << size.get_uint();
 				}
 				std::cout << ']' << std::endl;
+				callback(buffer, carriage - buffer, e, nullptr);
 			}
 		}else{
 			std::cout << "UNKNOWN ELEMENT!" << std::endl;
+			break;
 		}
-		const int len = carriage - buffer;
-		if(fwrite(buffer, 1, len, out) != len) {
-			printf("Failed to write output\n");
-			return;
-		} 
 	}
 }
 };
 
+FILE* out;
+uint8_t out_buffer[BUFSIZE];
+size_t out_len = 0;
+bool is_track_entry = false;
+struct track_entry {
+	int track_number;
+	uint64_t track_type;
+} last_track_entry{0, 0};
+std::vector<int> audio_track_numbers;
 
+uint64_t read_number(const uint8_t* data, int data_len)
+{
+	simple_vint track_number;
+	track_number.width = 0;
+	for(int i = 0; i < data_len; ++i){
+		track_number.data[i] = data[i];
+		track_number.width++;
+	}
+	return track_number.get_uint();
+}
+
+void flush_to_out_callback(const uint8_t* buffer, size_t len, const ebml_element* elem, const uint8_t* data)
+{
+	if (elem->name == "TrackEntry") {
+		if (is_track_entry) { // new track entry right after previous one
+			if (last_track_entry.track_type != 2) {
+				if (fwrite(out_buffer, 1, out_len, out) != out_len) {
+					printf("failed to write to output\n");
+					return;
+				}
+			} else {
+				audio_track_numbers.push_back(last_track_entry.track_number);
+			}
+		}
+		is_track_entry = true;
+		mempcpy(out_buffer, buffer, len);
+		out_len = len;
+		return;
+	}
+	if (elem->name == "Cues" 
+	|| elem->name == "Void" 
+	|| elem->name == "Cluster") {
+		is_track_entry = false;
+		if (last_track_entry.track_type != 2) {
+			if (fwrite(out_buffer, 1, out_len, out) != out_len) {
+				printf("failed to write to output\n");
+				return;
+			}
+		} else {
+			audio_track_numbers.push_back(last_track_entry.track_number);
+		}
+	}
+	if (is_track_entry) {
+		int data_len = buffer + len - data;
+		if (elem->name == "TrackNumber") {
+			last_track_entry.track_number = read_number(data, data_len);
+		} else if (elem->name == "TrackType") {
+			last_track_entry.track_type = read_number(data, data_len);
+		}
+		mempcpy(out_buffer + out_len, buffer, len);
+		out_len += len;
+		return;
+	}
+
+	if(elem->type == BINARY){
+		if(elem->name == "SimpleBlock" || elem->name == "Block") {
+			uint8_t bits = data[0];
+			simple_vint track_number;
+			track_number.width = 1;
+			uint8_t mask = 0x80;
+			while(!(bits & mask)){
+				mask >>= 1;
+				track_number.width++;
+			}
+			track_number.data[0] = data[0] ^ mask;
+			for(int i = 1; i < track_number.width; ++i){
+				track_number.data[i] = data[i];
+			}
+			uint64_t track_number_target = track_number.get_uint();
+			std::cout << "Track Number: " << track_number_target << std::endl;
+			bool is_audio = std::find(audio_track_numbers.begin(), audio_track_numbers.end(), track_number_target) != audio_track_numbers.end();
+			if (is_audio)
+				return;
+		}
+	}
+
+	if (fwrite(buffer, 1, len, out) != len) {
+		printf("failed to write to output\n");
+		return;
+	}
+}
 
 int main(int argc, char** argv){
-	if(argc != 3) {
+	if (argc != 3) {
 		printf("Usage: %s <input.webm> <output.webm>\n", argv[0]);
 		return 1;
 	}
-	FILE * input = fopen(argv[1], "rb");
-	if(!input) {
-		printf("Can't open input file\n");
-		return -1;
+	FILE* in = fopen(argv[1], "rb");
+	if (!in){
+		printf("cannot open input file\n");
+		return 1;
 	}
-	FILE * output = fopen(argv[2], "wb");
-	if(!output) {
-		printf("Can't open output file!");
-		fclose(input);
-		return -2;
+	out = fopen(argv[2], "wb");
+	if (!out){
+		printf("cannot open output file\n");
+		fclose(in);
+		return 2;
 	}
+
 	ebml_parser p;
-	p.parse(input, output);
-	fclose(input);
-	fclose(output);
+	p.parse(in, &flush_to_out_callback);
+
+	fclose(in);
+	fclose(out);
 	return 0;
 }
