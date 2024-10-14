@@ -7,8 +7,8 @@
 #include <pthread.h>
 #include <chrono>
 
-#define WINDOW_SIZE 441 // Размер окна для FFT (10 миллисекунд для частоты дискретизации 44100 Гц)
-#define STEP_SIZE 44    // Шаг окна (1 миллисекунда для частоты дискретизации 44100 Гц)
+#define WINDOW_SIZE 2048 // Размер окна для FFT (10 миллисекунд для частоты дискретизации 44100 Гц)
+#define STEP_SIZE 1024   // Шаг окна (1 миллисекунда для частоты дискретизации 44100 Гц)
 
 using Complex = std::complex<double>;
 using ComplexArray = std::vector<Complex>;
